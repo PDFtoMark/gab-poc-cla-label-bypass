@@ -1,3 +1,4 @@
+---
 name: CLA Assistant
 on:
   issue_comment:
@@ -9,19 +10,23 @@ on:
       - closed
       - synchronize
       - labeled
-permissions:
-  actions: write
-  contents: write
-  pull-requests: write
-  statuses: write
-  checks: write
-  issues: write
 jobs:
   CLAAssistant:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      statuses: write
+      checks: write
+      issues: write
     steps:
-      # Replaces "Checkout Private Repo for Allowlist" + "Read Allowlist File":
-      # the real allowlist lives in OpenZeppelin/cla-sigs and contains only trusted bots/users.
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a  # v2.13.1
+        with:
+          egress-policy: audit
+      # SUBSTITUTION: real step checks out OpenZeppelin/cla-sigs (private) with
+      # secrets.CLA_SIGS_ACCESS_PAT and reads allowlist.txt. The PoC uses a fixed list.
       - name: Read Allowlist File
         id: read_allowlist
         run: |
@@ -31,26 +36,20 @@ jobs:
         id: check_allowlist
         run: |
           PR_USER=${{ github.event.pull_request.user.login }}
-          echo "event=${{ github.event_name }} resolved PR_USER=[$PR_USER]"
-          echo "allowlist=[${{ steps.read_allowlist.outputs.allowlist }}]"
           if [[ "${{ steps.read_allowlist.outputs.allowlist }}" == *"$PR_USER"* ]]; then
             echo "is_allowed=true" >> $GITHUB_OUTPUT
           else
             echo "is_allowed=false" >> $GITHUB_OUTPUT
           fi
-          echo "--- control: evaluate a real non-allowlisted login"
-          if [[ "${{ steps.read_allowlist.outputs.allowlist }}" == *"some-outsider"* ]]; then
-            echo "control_is_allowed=true"
-          else
-            echo "control_is_allowed=false"
-          fi
-      # Simulates contributor-assistant/github-action being unable to find a signature
-      # for the PR author (i.e. the PR is NOT signed). continue-on-error matches target.
+      # SUBSTITUTION: real step is contributor-assistant/github-action@ca4a40a7... (v2.6.1),
+      # which needs the private cla-sigs PAT. This stub reproduces its observable behaviour
+      # for an unsigned contributor (setFailed) and keeps the target's if/id/continue-on-error.
       - name: CLA Assistant
-        id: cla_assistant
         continue-on-error: true
+        id: cla_assistant
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I confirm that I have read and hereby agree to the OpenZeppelin Contributor License Agreement') || github.event_name == 'pull_request_target'
         run: |
-          echo "simulated: no CLA signature on record for PR author"
+          echo "simulated: no CLA signature on record for the PR author"
           exit 1
       - name: Label PR as CLA Unsigned
         if: ${{ steps.cla_assistant.outcome != 'success' && steps.check_allowlist.outputs.is_allowed == 'false' }}
@@ -61,7 +60,7 @@ jobs:
             PR_NUMBER="${{ github.event.issue.number }}"
           fi
           ENDPOINT="https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels"
-          curl -sS -L -X POST \
+          curl -L -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -70,7 +69,26 @@ jobs:
           exit 1
       - name: Label PR as CLA Signed
         if: ${{ steps.cla_assistant.outcome == 'success' && steps.check_allowlist.outputs.is_allowed == 'false' }}
-        run: echo "would mark signed"
+        run: |-
+          if [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            PR_NUMBER="${{ github.event.issue.number }}"
+          fi
+          ENDPOINT="https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels"
+          # Remove 'cla: unsigned' label if present
+          curl -L -X DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$ENDPOINT/cla:%20unsigned" || true
+          # Add 'cla: signed' label
+          curl -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d '{"labels":["cla: signed"]}' \
+            $ENDPOINT
       - name: Label PR as CLA Allowlist
         if: ${{ steps.check_allowlist.outputs.is_allowed == 'true' }}
         run: |-
@@ -80,17 +98,20 @@ jobs:
             PR_NUMBER="${{ github.event.issue.number }}"
           fi
           ENDPOINT="https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/labels"
-          curl -sS -L -X DELETE \
+          # Remove 'cla: unsigned' label if present
+          curl -L -X DELETE \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "$ENDPOINT/cla:%20unsigned" || true
-          curl -sS -L -X DELETE \
+          # Remove 'cla: signed' label if present
+          curl -L -X DELETE \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "$ENDPOINT/cla:%20signed" || true
-          curl -sS -L -X POST \
+          # Add allowlist label
+          curl -L -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
